@@ -17,14 +17,8 @@ class PVSystem:
         self.panel_efficiency_stc = 0.218  
         self.temperature_coefficient_pmax = -0.0034  
         
-        # NOCT dal datasheet (valore standard di laboratorio)
         self.NOCT_datasheet = 43
-        
-        # Delta per installazione su tetto (roof added)
-        # Tipicamente tra 3 e 7°C. Usiamo 5°C come valore conservativo
         self.roof_delta = 2
-        
-        # NOCT effettivo per i calcoli
         self.NOCT_effective = self.NOCT_datasheet + self.roof_delta
         
         self.module_area = 1.762 * 1.134
@@ -33,28 +27,27 @@ class PVSystem:
         self.inverter_eff = 0.96
         self.installed_power_kw = (self.num_panels * self.panel_power_stc) / 1000
         
-        # Determinazione clima in base alla latitudine
         if self.latitude >= 50:
-            self.clima_type = "NORDICO (nuvoloso/freddo)"
+            self.clima_type = "NORDICO"
             self.pr_a, self.pr_b = 0.88, 0.12
         elif self.latitude >= 40:
-            self.clima_type = "MEDITERRANEO (soleggiato/caldo)"
+            self.clima_type = "MEDITERRANEO"
             self.pr_a, self.pr_b = 0.90, 0.10
         else:
-            self.clima_type = "EQUATORIALE (molto soleggiato/caldo)"
+            self.clima_type = "EQUATORIALE"
             self.pr_a, self.pr_b = 0.92, 0.08
        
         print(f"\n{'='*60}")
-        print(f"📊 SISTEMA: {self.installed_power_kw:.2f} kWp | PR_ref: {self.PR_ref}")
-        print(f"📍 Coordinate: {self.latitude}°N, {self.longitude}°E")
-        print(f"🌤️ Clima: {self.clima_type}")
-        print(f"📐 Formula PR: {self.pr_a} + {self.pr_b} * kt")
-        print(f"🏗️ Installazione: Roof Added (delta = +{self.roof_delta}°C)")
-        print(f"🌡️ NOCT efficace: {self.NOCT_datasheet}°C (datasheet) + {self.roof_delta}°C = {self.NOCT_effective}°C")
+        print(f"SISTEMA: {self.installed_power_kw:.2f} kWp | PR_ref: {self.PR_ref}")
+        print(f"Coordinate: {self.latitude}N, {self.longitude}E")
+        print(f"Clima: {self.clima_type}")
+        print(f"Formula PR: {self.pr_a} + {self.pr_b} * kt")
+        print(f"Installazione: Roof Added (delta = +{self.roof_delta}C)")
+        print(f"NOCT effettivo: {self.NOCT_datasheet}C (datasheet) + {self.roof_delta}C = {self.NOCT_effective}C")
         print(f"{'='*60}")
 
 def build_tmy_from_multiyear(system):
-    print(f"🌍 Download e elaborazione dati PVGIS (2005-2020) per {system.latitude}°N, {system.longitude}°E...")
+    print(f"Download dati PVGIS (2005-2020) per {system.latitude}N, {system.longitude}E...")
     try:
         res = pvlib.iotools.get_pvgis_hourly(
             latitude=system.latitude, longitude=system.longitude,
@@ -88,7 +81,7 @@ def build_tmy_from_multiyear(system):
        
         return result
     except Exception as e:
-        print(f"❌ Errore: {e}")
+        print(f"Errore: {e}")
         return None
 
 def calculate_daily_data(system, hourly_data):
@@ -98,10 +91,8 @@ def calculate_daily_data(system, hourly_data):
     hourly_data['g_avg'] = hourly_data['poa_global']
     hourly_data['kt'] = np.clip(hourly_data['g_avg'] / 1000, 0, 1)
     
-    # FORMULA PR DINAMICA ADATTATA AL CLIMA (determinato automaticamente dalla latitudine)
     hourly_data['pr_dyn'] = system.PR_ref * (system.pr_a + system.pr_b * hourly_data['kt'])
    
-    # Usa NOCT_effective (datasheet + delta per tetto)
     hourly_data['t_cell'] = hourly_data['temp_air'] + (system.NOCT_effective - 20) * (hourly_data['g_avg'] / 800)
     hourly_data['eff'] = system.panel_efficiency_stc * (1 + system.temperature_coefficient_pmax * (hourly_data['t_cell'] - 25))
     
@@ -184,25 +175,25 @@ def calculate_metrics(daily_df, monthly_df):
 
 def print_metrics_analysis(metrics):
     print(f"\n{'='*90}")
-    print(f"📊 ANALISI METRICHE DI ERRORE - VALIDAZIONE MODELLO")
+    print(f"METRICHE DI ERRORE - VALIDAZIONE MODELLO")
     print(f"{'='*90}")
     
-    print(f"\n📈 METRICHE GIORNALIERE:")
+    print(f"\nMETRICHE GIORNALIERE:")
     print(f"{'-'*60}")
     print(f"MAPE:  {metrics['daily']['MAPE (%)']:.3f}%")
     print(f"MBE:   {metrics['daily']['MBE (kWh)']:.4f} kWh  ({metrics['daily']['MBE_rel (%)']:+.3f}%)")
     print(f"RMSE:  {metrics['daily']['RMSE (kWh)']:.4f} kWh  ({metrics['daily']['RMSE_rel (%)']:.3f}%)")
     print(f"nRMSE: {metrics['daily']['nRMSE (%)']:.3f}%")
     
-    print(f"\n📝 COMMENTO METRICHE GIORNALIERE:")
+    print(f"\nCOMMENTO METRICHE GIORNALIERE:")
     if metrics['daily']['MAPE (%)'] < 5:
-        print(f"   ✅ MAPE = {metrics['daily']['MAPE (%)']:.3f}% → ECCELLENTE")
+        print(f"   MAPE = {metrics['daily']['MAPE (%)']:.3f}% -> ECCELLENTE")
     elif metrics['daily']['MAPE (%)'] < 10:
-        print(f"   ⚠️ MAPE = {metrics['daily']['MAPE (%)']:.3f}% → ACCETTABILE")
+        print(f"   MAPE = {metrics['daily']['MAPE (%)']:.3f}% -> ACCETTABILE")
     else:
-        print(f"   ❌ MAPE = {metrics['daily']['MAPE (%)']:.3f}% → MIGLIORABILE")
+        print(f"   MAPE = {metrics['daily']['MAPE (%)']:.3f}% -> MIGLIORABILE")
     
-    print(f"\n📊 METRICHE MENSILI:")
+    print(f"\nMETRICHE MENSILI:")
     print(f"{'-'*60}")
     print(f"MAPE:   {metrics['monthly']['MAPE (%)']:.3f}%")
     print(f"MBE:    {metrics['monthly']['MBE (kWh)']:.4f} kWh  ({metrics['monthly']['MBE_rel (%)']:+.3f}%)")
@@ -210,18 +201,18 @@ def print_metrics_analysis(metrics):
     print(f"nRMSE:  {metrics['monthly']['nRMSE (%)']:.3f}%")
     print(f"R²:     {metrics['monthly']['R²']:.5f}")
     
-    print(f"\n🎯 VALUTAZIONE COMPLESSIVA:")
+    print(f"\nVALUTAZIONE COMPLESSIVA:")
     score = 0
     if metrics['monthly']['MAPE (%)'] < 1: score += 3
     if abs(metrics['monthly']['MBE_rel (%)']) < 0.2: score += 3
     if metrics['monthly']['R²'] > 0.99: score += 4
     
     if score >= 9:
-        print(f"   🏆 PUNTEGGIO: {score}/10 → MODELLO ECCELLENTE")
+        print(f"   PUNTEGGIO: {score}/10 -> MODELLO ECCELLENTE")
     elif score >= 7:
-        print(f"   👍 PUNTEGGIO: {score}/10 → MODELLO BUONO")
+        print(f"   PUNTEGGIO: {score}/10 -> MODELLO BUONO")
     else:
-        print(f"   ⚠️ PUNTEGGIO: {score}/10 → MODELLO MIGLIORABILE")
+        print(f"   PUNTEGGIO: {score}/10 -> MODELLO MIGLIORABILE")
 
 def print_report(daily_df):
     monthly = daily_df.resample('M').agg({
@@ -237,7 +228,7 @@ def print_report(daily_df):
     })
     
     print(f"\n{'='*90}")
-    print(f"📊 REPORT MENSILE - PRODUZIONE")
+    print(f"REPORT MENSILE - PRODUZIONE")
     print(f"{'='*90}")
     print(f"\n{'MESE':<10} | {'MIO MODELLO':<12} | {'PVGIS':<12} | {'DIFF %':<8}")
     print("-" * 55)
@@ -253,25 +244,25 @@ def print_report(daily_df):
     print(f"TOTALE     | {total_mio:>11.1f} | {total_pvgis:>11.1f} | {total_diff:>7.2f}%")
     
     print(f"\n{'='*90}")
-    print(f"📊 REPORT MENSILE - EFFICIENZE E TEMPERATURE")
+    print(f"REPORT MENSILE - EFFICIENZE E TEMPERATURE")
     print(f"{'='*90}")
     print(f"\n{'MESE':<10} | {'EFF. CELLA':<12} | {'EFF. SISTEMA':<12} | {'PR':<8} | {'T_CELLA':<10} | {'T_ARIA':<10}")
     print("-" * 75)
     
     for i, row in enumerate(monthly.itertuples(), 1):
         eff_cella_pct = row.efficienza_cella * 100
-        print(f"{i:<10} | {eff_cella_pct:>11.1f}% | {row.efficienza_sistema_perc:>11.1f}% | {row.pr_medio:>7.3f} | {row.temp_cella:>9.1f}°C | {row.temp_aria:>9.1f}°C")
+        print(f"{i:<10} | {eff_cella_pct:>11.1f}% | {row.efficienza_sistema_perc:>11.1f}% | {row.pr_medio:>7.3f} | {row.temp_cella:>9.1f}C | {row.temp_aria:>9.1f}C")
     
     print(f"\n{'='*90}")
-    print(f"📊 STATISTICHE ANNUALI")
+    print(f"STATISTICHE ANNUALI")
     print(f"{'='*90}")
     installed_kw = 2.175
-    print(f"☀️ Radiazione annuale: {monthly['rad_kwhm2'].sum():.1f} kWh/m²")
-    print(f"🏭 Produzione specifica: {total_mio / installed_kw:.1f} kWh/kWp")
-    print(f"📈 Performance Ratio medio: {monthly['pr_medio'].mean():.3f}")
-    print(f"🌡️ Temperatura cella media: {monthly['temp_cella'].mean():.1f}°C")
-    print(f"⚡ Efficienza sistema media: {monthly['efficienza_sistema_perc'].mean():.1f}%")
-    print(f"🎯 Fattore di capacità: {(total_mio / (installed_kw * 8760)) * 100:.1f}%")
+    print(f"Radiazione annuale: {monthly['rad_kwhm2'].sum():.1f} kWh/m²")
+    print(f"Produzione specifica: {total_mio / installed_kw:.1f} kWh/kWp")
+    print(f"Performance Ratio medio: {monthly['pr_medio'].mean():.3f}")
+    print(f"Temperatura cella media: {monthly['temp_cella'].mean():.1f}C")
+    print(f"Efficienza sistema media: {monthly['efficienza_sistema_perc'].mean():.1f}%")
+    print(f"Fattore di capacita: {(total_mio / (installed_kw * 8760)) * 100:.1f}%")
     
     metrics = calculate_metrics(daily_df, monthly)
     print_metrics_analysis(metrics)
@@ -279,7 +270,7 @@ def print_report(daily_df):
     return metrics
 
 def export_to_excel(daily_df, metrics, filename):
-    print(f"\n💾 Esportazione dati in Excel...")
+    print(f"\nEsportazione dati in Excel...")
     
     try:
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
@@ -323,13 +314,13 @@ def export_to_excel(daily_df, metrics, filename):
             })
             metrics_df.to_excel(writer, sheet_name='Metriche_Errore', index=False)
             
-        print(f"✅ File Excel salvato: {filename}")
+        print(f"File Excel salvato: {filename}")
     except Exception as e:
-        print(f"⚠️ Errore nel salvataggio Excel: {e}")
+        print(f"Errore nel salvataggio Excel: {e}")
 
 def print_daily_summary(daily_df, num_days=10):
     print(f"\n{'='*100}")
-    print(f"📊 RIEPILOGO PRIMI {num_days} GIORNI")
+    print(f"RIEPILOGO PRIMI {num_days} GIORNI")
     print(f"{'='*100}")
     
     print(f"\n{'DATA':<12} | {'PROD MIO':<10} | {'PROD PVGIS':<10} | {'ERRORE %':<9} | {'RAD(kWh/m²)':<12} | {'EFF SIST%':<10}")
@@ -342,37 +333,13 @@ def print_daily_summary(daily_df, num_days=10):
         print(f"{date:<12} | {row['prod_mio']:>9.2f} | {row['prod_pvgis']:>9.2f} | {errore_pct:>8.2f} | {row['rad_kwhm2']:>10.2f} | {row['efficienza_sistema_perc']:>9.1f}%")
 
 def main():
-    # ============================================================
-    # INSERISCI QUI LE COORDINATE DELLA LOCALITÀ CHE VUOI ANALIZZARE
-    # ============================================================
-    
-    # Esempio: Maynooth (Irlanda) - clima nordico
     latitude = 53.383
     longitude = -6.592
     
-    # Per Genova (Italia) - clima mediterraneo, decommenta queste righe:
-    # latitude = 44.398
-    # longitude = 8.979
-    
-    # Per Roma (Italia):
-    # latitude = 41.902
-    # longitude = 12.496
-    
-    # Per Londra (UK):
-    # latitude = 51.507
-    # longitude = -0.128
-    
-    # Per Milano (Italia):
-    # latitude = 45.464
-    # longitude = 9.190
-    
-    # ============================================================
-    
     print(f"\n{'#'*60}")
-    print(f"# ANALISI PER LOCALITÀ: LAT {latitude}°N, LON {longitude}°E")
+    print(f"ANALISI PER LOCALITA: LAT {latitude}N, LON {longitude}E")
     print(f"{'#'*60}")
     
-    # Crea il sistema con le coordinate inserite
     sys = PVSystem(latitude=latitude, longitude=longitude)
     data = build_tmy_from_multiyear(sys)
     
@@ -381,12 +348,11 @@ def main():
         metrics = print_report(daily)
         print_daily_summary(daily, num_days=15)
         
-        # Nome file dinamico in base alle coordinate
         filename = f'produzione_fotovoltaico_{latitude}_{longitude}.xlsx'
         export_to_excel(daily, metrics, filename)
         
         print(f"\n{'='*60}")
-        print(f"✅ ANALISI COMPLETATA!")
+        print(f"ANALISI COMPLETATA")
         print(f"{'='*60}")
 
 if __name__ == "__main__":
