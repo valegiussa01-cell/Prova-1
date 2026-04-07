@@ -1,0 +1,359 @@
+import pandas as pd
+import numpy as np
+import pvlib
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class PVSystem:
+    def __init__(self, latitude, longitude):
+        self.latitude = latitude
+        self.longitude = longitude
+
+        # Orientamento
+        self.tilt = 30
+        self.azimuth_pvlib = 180
+
+        # Moduli
+        self.num_panels = 5
+        self.panel_power_stc = 435
+        self.panel_efficiency_stc = 0.218
+        self.temperature_coefficient_pmax = -0.0034
+
+        # Temperatura
+        self.NOCT_datasheet = 43
+        self.roof_delta = 2
+        self.NOCT_effective = self.NOCT_datasheet + self.roof_delta
+
+        # Area
+        self.module_area = 1.762 * 1.134
+        self.total_area = self.num_panels * self.module_area
+
+        # Perdite di sistema
+        self.PR_ref = 0.94
+        self.inverter_eff = 0.96
+
+        self.installed_power_kw = (self.num_panels * self.panel_power_stc) / 1000
+
+        # Parametri Sandia - presi da un paper che avevo letto
+        self.a_sandia = -3.48
+        self.b_sandia = -0.080
+
+        # Correzione PR in base alla latitudine (mi ha aiutato un collega)
+        if self.latitude >= 50:
+            self.pr_a, self.pr_b = 0.88, 0.12
+        elif self.latitude >= 40:
+            self.pr_a, self.pr_b = 0.90, 0.10
+        else:
+            self.pr_a, self.pr_b = 0.92, 0.08
+
+        print("\n" + "="*60)
+        print(f"CONFIGURAZIONE SISTEMA FOTOVOLTAICO")
+        print("="*60)
+        print(f"Potenza installata:     {self.installed_power_kw:.2f} kWp")
+        print(f"Latitudine:             {self.latitude}°")
+        print(f"Longitudine:            {self.longitude}°")
+        print(f"Inclinazione moduli:    {self.tilt}°")
+        print(f"Azimut:                 {self.azimuth_pvlib}°")
+        print(f"Numero pannelli:        {self.num_panels}")
+        print(f"Area totale:            {self.total_area:.2f} m²")
+        print(f"Efficienza riferimento: {self.panel_efficiency_stc*100:.1f}%")
+        print(f"PR riferimento:         {self.PR_ref*100:.1f}%")
+        print(f"Efficienza inverter:    {self.inverter_eff*100:.1f}%")
+        print("="*60)
+
+
+def build_tmy_from_multiyear(system):
+    """Scarica i dati da PVGIS e costruisce un TMY"""
+    
+    print("\n[1/3] Scaricamento dati meteorologici da PVGIS...")
+    print(f"      Periodo: 2005-2020")
+    
+    res = pvlib.iotools.get_pvgis_hourly(
+        latitude=system.latitude,
+        longitude=system.longitude,
+        start=2005,
+        end=2020,
+        surface_tilt=system.tilt,
+        surface_azimuth=system.azimuth_pvlib,
+        components=True,
+        usehorizon=True,
+        raddatabase='PVGIS-SARAH3'
+    )
+
+    data = res[0].copy()
+
+    # Tolgo il 29 febbraio per evitare problemi con gli anni bisestili
+    data = data[~((data.index.month == 2) & (data.index.day == 29))]
+
+    # Calcolo la POA globale
+    data['poa_global'] = (
+        data['poa_direct'] +
+        data['poa_sky_diffuse'] +
+        data['poa_ground_diffuse']
+    )
+
+    # Produzione di riferimento da PVGIS
+    if 'P' in data.columns:
+        data['pvgis_prod_kwh'] = data['P'] / 1000
+    else:
+        # Fallback se la colonna P non c'è
+        data['pvgis_prod_kwh'] = (
+            data['poa_global'] / 1000
+        ) * system.installed_power_kw * 0.84
+
+    # Creo un TMY facendo la media su tutti gli anni
+    tmy = data.groupby(
+        [data.index.month, data.index.day, data.index.hour]
+    ).mean()
+
+    # Uso il 2015 (non bisestile) come calendario
+    # L'anno è solo un contenitore, i dati sono medie 2005-2020
+    index = pd.date_range(start='2015-01-01', periods=8760, freq='h')
+
+    result = pd.DataFrame(index=index)
+    result['poa_global'] = tmy['poa_global'].values
+    result['temp_air'] = tmy['temp_air'].values
+    result['pvgis_ref_kwh'] = tmy['pvgis_prod_kwh'].values
+    
+    print(f"      Dati scaricati: {len(result)} ore")
+    print(f"      POA media annua: {result['poa_global'].mean():.1f} W/m²")
+    print(f"      Temperatura media: {result['temp_air'].mean():.1f}°C")
+
+    return result
+
+
+def calculate_daily_data(system, hourly):
+    """Calcola la produzione oraria e poi giornaliera"""
+    
+    print("\n[2/3] Calcolo della produzione oraria...")
+    
+    # Clearness index
+    hourly['kt'] = np.clip(hourly['poa_global'] / 1000, 0, 1)
+
+    # PR dinamico
+    hourly['pr_dyn'] = system.PR_ref * (
+        system.pr_a + system.pr_b * hourly['kt']
+    )
+
+    # Vento stagionale - valori trovati per tentativi
+    month = hourly.index.month
+    wind_speed = np.where(
+        (month >= 5) & (month <= 8),
+        0.8,   # estate poco vento
+        np.where(
+            (month <= 2) | (month >= 11),
+            1.5,  # inverno più vento
+            1.1   # primavera/autunno
+        )
+    )
+
+    # Temperatura cella con Sandia
+    hourly['t_cell'] = hourly['temp_air'] + \
+        hourly['poa_global'] * np.exp(
+            system.a_sandia + system.b_sandia * wind_speed
+        )
+
+    # Efficienza
+    hourly['eff'] = system.panel_efficiency_stc * (
+        1 + system.temperature_coefficient_pmax *
+        (hourly['t_cell'] - 25)
+    )
+
+    # Produzione oraria
+    hourly['prod_h'] = (
+        hourly['poa_global'] / 1000
+    ) * system.total_area * hourly['eff'] * \
+        hourly['pr_dyn'] * system.inverter_eff
+
+    # Aggrego per giorno
+    daily = hourly.resample('D').agg({
+        'prod_h': 'sum',
+        'pvgis_ref_kwh': 'sum'
+    })
+
+    daily.rename(columns={
+        'prod_h': 'prod_mio',
+        'pvgis_ref_kwh': 'prod_pvgis'
+    }, inplace=True)
+    
+    # Aggiungo colonne utili per l'analisi
+    daily['giorno'] = daily.index.day
+    daily['mese'] = daily.index.month
+    daily['data_str'] = daily.index.strftime('%m-%d')
+    
+    # Calcolo errore assoluto e percentuale giornaliero
+    daily['errore_kwh'] = daily['prod_mio'] - daily['prod_pvgis']
+    daily['errore_perc'] = (daily['errore_kwh'] / daily['prod_pvgis']) * 100
+    
+    print(f"      Calcolate {len(daily)} giornate")
+    print(f"      Produzione media giornaliera (modello): {daily['prod_mio'].mean():.2f} kWh")
+    print(f"      Produzione media giornaliera (PVGIS):   {daily['prod_pvgis'].mean():.2f} kWh")
+    
+    return daily
+
+
+def calculate_metrics(daily):
+    """Calcola e stampa metriche di errore"""
+    
+    err = daily['prod_mio'] - daily['prod_pvgis']
+    
+    # Metriche principali
+    mape = np.mean(np.abs(err / daily['prod_pvgis'])) * 100
+    mbe = np.mean(err)
+    rmse = np.sqrt(np.mean(err**2))
+    
+    # Metriche aggiuntive
+    mae = np.mean(np.abs(err))
+    nrmse = rmse / daily['prod_pvgis'].mean() * 100
+    r2 = 1 - (np.sum(err**2) / np.sum((daily['prod_pvgis'] - daily['prod_pvgis'].mean())**2))
+    
+    print("\n" + "="*60)
+    print("METRICHE DI ERRORE")
+    print("="*60)
+    print(f"MAPE  (Mean Absolute Percentage Error):  {mape:.3f}%")
+    print(f"MBE   (Mean Bias Error):                {mbe:.4f} kWh")
+    print(f"RMSE  (Root Mean Square Error):         {rmse:.4f} kWh")
+    print(f"MAE   (Mean Absolute Error):            {mae:.4f} kWh")
+    print(f"NRMSE (Normalized RMSE):                {nrmse:.3f}%")
+    print(f"R²    (Coefficient of determination):   {r2:.4f}")
+    print("="*60)
+    
+    return {
+        'MAPE (%)': mape,
+        'MBE (kWh)': mbe,
+        'RMSE (kWh)': rmse,
+        'MAE (kWh)': mae,
+        'NRMSE (%)': nrmse,
+        'R²': r2
+    }
+
+
+def print_report(daily):
+    """Stampa report mensile dettagliato"""
+    
+    monthly = daily.resample('M').agg({
+        'prod_mio': 'sum',
+        'prod_pvgis': 'sum',
+        'errore_kwh': 'sum',
+        'errore_perc': 'mean'
+    })
+    
+    print("\n" + "="*60)
+    print("REPORT MENSILE DELLA PRODUZIONE")
+    print("="*60)
+    print(f"{'MESE':<6} | {'MIO (kWh)':>10} | {'PVGIS (kWh)':>12} | {'DIFF (kWh)':>10} | {'DIFF %':>8}")
+    print("-"*60)
+    
+    mesi = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 
+            'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic']
+    
+    for i, row in enumerate(monthly.itertuples()):
+        print(f"{mesi[i]:<6} | {row.prod_mio:>10.1f} | {row.prod_pvgis:>12.1f} | {row.errore_kwh:>10.2f} | {row.errore_perc:>7.2f}%")
+
+    # Totali annuali
+    tot_mio = daily['prod_mio'].sum()
+    tot_pvgis = daily['prod_pvgis'].sum()
+    tot_err = tot_mio - tot_pvgis
+    diff_tot = (tot_err / tot_pvgis) * 100
+    
+    print("-"*60)
+    print(f"{'TOTALE':<6} | {tot_mio:>10.1f} | {tot_pvgis:>12.1f} | {tot_err:>10.2f} | {diff_tot:>7.2f}%")
+    print("="*60)
+    
+    return monthly
+
+
+def export_to_excel(daily, monthly, metrics, filename='produzione_fv.xlsx'):
+    """Esporta i risultati in file Excel con più fogli"""
+    
+    print(f"\n[3/3] Esportazione dati in Excel...")
+    
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        # Foglio 1: Dati giornalieri
+        daily_export = daily[['data_str', 'giorno', 'mese', 'prod_mio', 'prod_pvgis', 'errore_kwh', 'errore_perc']].copy()
+        daily_export.columns = ['Data (Mese-Giorno)', 'Giorno', 'Mese', 'Prod_Modello_kWh', 'Prod_PVGIS_kWh', 'Errore_kWh', 'Errore_%']
+        daily_export.to_excel(writer, sheet_name='Dati_Giornalieri', index=False)
+        
+        # Foglio 2: Dati mensili
+        monthly_export = monthly.reset_index()
+        mesi_nomi = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+                     'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre']
+        monthly_export['Mese'] = mesi_nomi
+        monthly_export = monthly_export[['Mese', 'prod_mio', 'prod_pvgis', 'errore_kwh', 'errore_perc']]
+        monthly_export.columns = ['Mese', 'Prod_Modello_kWh', 'Prod_PVGIS_kWh', 'Errore_kWh', 'Errore_%']
+        monthly_export.to_excel(writer, sheet_name='Dati_Mensili', index=False)
+        
+        # Foglio 3: Metriche
+        metrics_df = pd.DataFrame(list(metrics.items()), columns=['Metrica', 'Valore'])
+        metrics_df.to_excel(writer, sheet_name='Metriche', index=False)
+        
+        # Foglio 4: Configurazione sistema e note
+        config_data = {
+            'Parametro': [
+                'Potenza installata (kWp)', 
+                'Latitudine', 
+                'Longitudine', 
+                'Inclinazione', 
+                'Azimut', 
+                'Numero pannelli', 
+                'Area totale (m²)',
+                'Efficienza pannelli STC', 
+                'PR riferimento', 
+                'Efficienza inverter',
+                'Periodo dati PVGIS',
+                'Anno calendario',
+                'Tipo di dato',
+                'Nota importante'
+            ],
+            'Valore': [
+                round(daily['prod_mio'].sum() / 1000, 2),
+                53.383, 
+                -6.592, 
+                30, 
+                180, 
+                5, 
+                round(1.762*1.134*5, 2),
+                '21.8%', 
+                '94%', 
+                '96%',
+                '2005-2020',
+                '2015 (solo come calendario)',
+                'TMY - Typical Meteorological Year',
+                'I valori sono medie climatologiche del periodo 2005-2020, non dati reali del 2015'
+            ]
+        }
+        config_df = pd.DataFrame(config_data)
+        config_df.to_excel(writer, sheet_name='Configurazione', index=False)
+    
+    print(f"      File salvato: {filename}")
+    print(f"      NOTA: I dati rappresentano un ANNO TIPO (medie climatologiche 2005-2020)")
+    print(f"      Le date sono solo a scopo di calendario (mese-giorno)")
+
+
+def main():
+    # Dublino
+    latitude = 53.383
+    longitude = -6.592
+    
+    print("\n" + "="*60)
+    print("SIMULAZIONE PRODUZIONE FOTOVOLTAICO")
+    print("="*60)
+    print("NOTA: I risultati si basano su dati TMY (Typical Meteorological Year)")
+    print("      ovvero medie climatologiche del periodo 2005-2020")
+    print("="*60)
+    
+    system = PVSystem(latitude, longitude)
+    data = build_tmy_from_multiyear(system)
+    daily = calculate_daily_data(system, data)
+    monthly = print_report(daily)
+    metrics = calculate_metrics(daily)
+    export_to_excel(daily, monthly, metrics, 'produzione_fv_dublino.xlsx')
+    
+    print("\n" + "="*60)
+    print("SIMULAZIONE COMPLETATA!")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    main()
